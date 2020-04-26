@@ -13,28 +13,21 @@
 #endif
 
 // headers with used standard functions
-#include <iostream>
-#include <cstdlib>
-#include <filesystem>
 using namespace std;
 
 // this includes the dlsym to load the original function
 #include <dlfcn.h>
 
-// SPDlog Header-Only Logger
-#include "spdlog/spdlog.h"
-#include "spdlog/sinks/stdout_sinks.h"
-#include "spdlog/fmt/fmt.h"
-std::shared_ptr<spdlog::logger> logger;
-
-// Type definition for overwritten function
-typedef int (*original_flock_type)(int, int);
-typedef int (*original_close_type)(int);
+// class for lock information and other support functions
+#include "lock_info.h"
+#include "support.h"
+shared_ptr<spdlog::logger> logger;
 original_flock_type originalFlock;
+original_fcntl_type originalFcntl;
 original_close_type originalClose;
 
 // a dictionary to keep track of locks
-map<int, string> lock_map;
+map<int, shared_ptr<LockInfo>> lock_map;
 
 /*
  * Cleanup function called when the program loading this library is closed. This is unfortunately not
@@ -46,36 +39,9 @@ void __attribute__ ((destructor)) cleanup() {
 
     // loop over all remaining locks and remove them
     for (const auto& one_lock: lock_map) {
-        logger->info("removing lock for fd={0}, path={1}", one_lock.first, one_lock.second);
+        logger->info("removing lock for fd={0}, path={1}", one_lock.first, one_lock.second->orignal_path);
+        one_lock.second->cleanup();
     }
-}
-
-/*
- * check /proc/self/fd/ to get the absolute path of the file to lock
- */
-string get_path_for_fd(int fd) {
-    string result;
-    try {
-        result = filesystem::read_symlink(fmt::format("/proc/self/fd/{}", fd));
-    } catch(exception& e){
-        logger->warn("get_path_for_fd: unable to get path for {}, no lock will be created!", fd);
-        logger->warn(e.what());
-        result = "";
-    }
-    return result;
-}
-
-/*
- * contruct a local file name in /var/lock/localflock to use for the lock
- */
-string get_local_lock_path(string &path) {
-    string suffix;
-    suffix.assign(path, 1, string::npos);
-    for (int i=0; i < suffix.size(); i++) {
-        if (suffix[i] == '/') suffix[i] = '-';
-    }
-    string result = fmt::format("/var/lock/localflock/{}", suffix);
-    return result;
 }
 
 /*
@@ -84,10 +50,17 @@ string get_local_lock_path(string &path) {
 void __attribute__ ((constructor)) init() {
     // get pointers to the original system functions.
     originalFlock = (original_flock_type)dlsym(RTLD_NEXT, "flock");
+    originalFcntl = (original_fcntl_type)dlsym(RTLD_NEXT, "fcntl");
     originalClose = (original_close_type)dlsym(RTLD_NEXT, "close");
 
     // register a logger
     logger = spdlog::stderr_logger_st("localflock");
+
+    // create the local folder for locks.
+    if (!filesystem::is_directory("/var/lock/localflock")) {
+        filesystem::create_directory("/var/lock/localflock");
+        filesystem::permissions("/var/lock/localflock", filesystem::perms::all);
+    }
 }
 
 /*
@@ -96,19 +69,108 @@ void __attribute__ ((constructor)) init() {
 extern "C" int flock(int fd, int operation) {
     logger->info("flock({0}, {1})", fd, operation);
 
-    // the get absolute path to the file, do nothing if this fails
-    string abs_path = get_path_for_fd(fd);
-    if (abs_path == "") return 1;
-    logger->info("    -> {}", abs_path);
+    // if this file is not already in our lock_map, create
+    if (lock_map.count(fd) == 0) {
+        // store information about this files. We also create the local lock file here
+        lock_map[fd] = shared_ptr<LockInfo>(new LockInfo(fd));
+        logger->info("number of locks: {}", lock_map.size());
+        logger->info("\n{}", lock_map[fd]->str());
+    }
 
-    // store the path for later lock removal
-    lock_map[fd] = abs_path;
-    logger->info("number of locks: {}", lock_map.size());
+    // perform the operation on the local file
+    logger->info("calling flock for {}", lock_map[fd]->local_fd);
+    return originalFlock(lock_map[fd]->local_fd, operation);
+}
 
-    // create the temporal lock file
-    string tmp_name = get_local_lock_path(abs_path);
-    logger->info("    -> {}", tmp_name);
-    return originalFlock(fd, operation);
+
+/*
+ * Replacement for the fcntl function. This function is used for different things. We decide based
+ * on the second argument whether to call the original fcntl on the original or the lock file.
+ */
+extern "C" int fcntl(int fd, int operation, ...) {
+    logger->info("fcntl({0}, {1}, ...)", fd, operation);
+    // we have to deal with a variable list of arguments. The third argument is optional.
+    // and can have different types.
+    struct flock* arg_flock;
+    struct f_owner_ex* arg_f_owner_ex;
+    int arg_int;
+    uint64_t* arg_uint64_t;
+    int result = -1;
+    va_list vl;
+    va_start(vl, operation);
+    switch (operation) {
+        // cases with integer argument
+        case F_DUPFD:
+        case F_DUPFD_CLOEXEC:
+        case F_SETFD:
+        case F_SETFL:
+        case F_SETOWN:
+        case F_SETSIG:
+        case F_SETLEASE:
+        case F_NOTIFY:
+        case F_SETPIPE_SZ:
+        case F_ADD_SEALS:
+            logger->info("    -> forwarding integer arg for original file");
+            arg_int = va_arg(vl, int);
+            result = originalFcntl(fd, operation, arg_int);
+            break;
+        // cases with uint64_t pointer
+        case F_GET_RW_HINT:
+        case F_SET_RW_HINT:
+        case F_GET_FILE_RW_HINT:
+        case F_SET_FILE_RW_HINT:
+            logger->info("    -> forwarding uint64_t* arg for original file");
+            arg_uint64_t = va_arg(vl, uint64_t*);
+            result = originalFcntl(fd, operation, arg_uint64_t);
+            break;
+        // cases with void argument
+        case F_GETFD:
+        case F_GETFL:
+        case F_GETOWN:
+        case F_GETSIG:
+        case F_GETLEASE:
+        case F_GETPIPE_SZ:
+        case F_GET_SEALS:
+            logger->info("    -> forwarding no arg for original file");
+            result = originalFcntl(fd, operation);
+            break;
+        // cases with f_owner_ex
+        case F_GETOWN_EX:
+        case F_SETOWN_EX:
+            logger->info("    -> forwarding f_owner_ex* arg for original file");
+            arg_f_owner_ex = va_arg(vl, f_owner_ex*);
+            result = originalFcntl(fd, operation, arg_f_owner_ex);
+            break;
+        // cases with flock we are interested in
+        case F_SETLK:
+        case F_SETLKW:
+        case F_GETLK:
+        case F_OFD_SETLK:
+        case F_OFD_SETLKW:
+        case F_OFD_GETLK:
+            arg_flock = va_arg(vl, struct flock*);
+
+            // if this file is not already in our lock_map, create
+            if (lock_map.count(fd) == 0) {
+                // store information about this files. We also create the local lock file here
+                lock_map[fd] = shared_ptr<LockInfo>(new LockInfo(fd));
+                logger->info("number of locks: {}", lock_map.size());
+                logger->info("\n{}", lock_map[fd]->str());
+            }
+
+            // perform the operation on the local file
+            logger->info("    -> forwarding flock* arg for local file {}", lock_map[fd]->local_path);
+            result = originalFcntl(lock_map[fd]->local_fd, operation, arg_flock);
+            break;
+        // for the default case, we assume no argument
+        default:
+            logger->warn("    -> unknown command called on original file");
+            result = originalFcntl(fd, operation);
+            break;
+    }
+    va_end(vl);
+    logger->info("    -> result: {}", result);
+    return result;
 }
 
 /*
@@ -116,7 +178,14 @@ extern "C" int flock(int fd, int operation) {
  */
 extern "C" int close(int fd) {
     logger->info("close({0})", fd);
-    string abs_path = get_path_for_fd(fd);
-    logger->info("    -> {}", abs_path);
+
+    // close the file and free the lock information if this is a known locked file.
+    if (lock_map.count(fd) > 0) {
+        logger->info("    -> {} is locked!", lock_map[fd]->orignal_path);
+        lock_map[fd]->cleanup();
+        lock_map.erase(fd);
+    }
+
+    // perform the actual close operation on the original file
     return originalClose(fd);
 }

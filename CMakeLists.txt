@@ -2,7 +2,8 @@ cmake_minimum_required(VERSION 3.0)
 project(localflock VERSION 0.1)
 
 # our target is a single library file
-add_library(localflock SHARED src/localflock.cpp)
+file(GLOB sources src/*.cpp)
+add_library(localflock SHARED ${sources})
 set_property(TARGET localflock PROPERTY CXX_STANDARD 17)
 
 # we link against dl and pthreads
