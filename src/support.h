@@ -33,6 +33,7 @@ extern original_close_type originalClose;
 // own functions
 string get_path_for_fd(int fd);
 string get_local_lock_path(string &path);
+int open_and_set_perm(string &path);
 
 // struct for settings
 struct settings_t {
@@ -42,6 +43,8 @@ struct settings_t {
     bool DEBUG;
     // whether or not to obscure files names. Default: false.
     bool SHOW_NAMES;
+    // name for the protocol file. Default: $LOCKDIR/protocl, not changeable
+    string PROTOCOL_FILE;
 };
 extern settings_t settings;
 

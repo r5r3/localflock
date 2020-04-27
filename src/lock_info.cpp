@@ -4,6 +4,7 @@
 
 #include "lock_info.h"
 #include "support.h"
+#include "protocol.h"
 
 LockInfo::LockInfo(int original_fd) {
     this->original_fd = original_fd;
@@ -14,12 +15,16 @@ LockInfo::LockInfo(int original_fd) {
     // construct the name used for the local lock file
     this->local_path = get_local_lock_path(this->orignal_path);
 
+    // make a protocol of writing this file. This is used to cleanup later
+    Protocol* proto = new Protocol();
+    proto->add(this->local_path);
+
     // actually create and open the local file
-    this->local_fd = open(this->local_path.c_str(), O_CREAT | O_RDWR);
-    filesystem::permissions(this->local_path, filesystem::perms::all
-                            & ~filesystem::perms::owner_exec
-                            & ~filesystem::perms::group_exec
-                            & ~filesystem::perms::others_exec);
+    this->local_fd = open_and_set_perm(this->local_path);
+
+    // close the protocol and release the lock
+    proto->close();
+    delete proto;
 }
 
 /*
@@ -33,7 +38,7 @@ LockInfo::~LockInfo() {
  * get a string representation of the lock information for logging and debugging.
  */
 string LockInfo::str() {
-    return fmt::format("Lock-Infomration:\n    -> orig. FD:   {0}\n    -> orig. path: {1}\n    -> local FD:   {2}\n    -> local path: {3}",
+    return fmt::format("Lock-Information:\n    -> orig. FD: {0}, path: {1}\n    -> local FD: {2}, path: {3}",
             this->original_fd,
             this->orignal_path,
             this->local_fd,

@@ -49,3 +49,14 @@ string get_local_lock_path(string &path) {
     return result;
 }
 
+/*
+ * Create a new file and set permission for everyone
+ */
+int open_and_set_perm(string &path) {
+    int fd = open(path.c_str(), O_CREAT | O_RDWR);
+    filesystem::permissions(path, filesystem::perms::all
+                                    & ~filesystem::perms::owner_exec
+                                    & ~filesystem::perms::group_exec
+                                    & ~filesystem::perms::others_exec);
+    return fd;
+}

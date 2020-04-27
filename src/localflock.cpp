@@ -18,9 +18,12 @@ using namespace std;
 // this includes the dlsym to load the original function
 #include <dlfcn.h>
 
+#include <memory>
+
 // class for lock information and other support functions
 #include "lock_info.h"
 #include "support.h"
+#include "protocol.h"
 shared_ptr<spdlog::logger> logger;
 original_flock_type originalFlock;
 original_fcntl_type originalFcntl;
@@ -37,9 +40,9 @@ settings_t settings __attribute__ ((init_priority (101)));;
  */
 void __attribute__ ((destructor)) cleanup() {
     logger->debug("cleanup");
-    logger->debug("cleaning up {} locks...", lock_map.size());
 
     // loop over all remaining locks and remove them
+    if (lock_map.size() > 0) logger->debug("cleaning up {} locks...", lock_map.size());
     for (const auto& one_lock: lock_map) {
         logger->debug("removing lock for fd={0}, path={1}", one_lock.first, one_lock.second->orignal_path);
         one_lock.second->cleanup();
@@ -65,14 +68,15 @@ void __attribute__ ((constructor)) init() {
     } else {
         settings.DEBUG = true;
         logger->set_level(spdlog::level::debug);
-        logger->debug("LOCALFLOCK_DEBUG=TRUE");
     }
+    logger->debug("LOCALFLOCK_DEBUG={}", settings.DEBUG);
     value = getenv("LOCALFLOCK_LOCKDIR");
     if (value == nullptr) {
         settings.LOCKDIR = "/var/lock/localflock";
     } else {
         settings.LOCKDIR = string(value);
     }
+    settings.PROTOCOL_FILE = fmt::format("{}/protocol", settings.LOCKDIR);
     logger->debug("LOCALFLOCK_LOCKDIR={}", settings.LOCKDIR);
     value = getenv("LOCALFLOCK_SHOW_NAMES");
     if (value == nullptr) {
@@ -90,6 +94,12 @@ void __attribute__ ((constructor)) init() {
         filesystem::create_directory(settings.LOCKDIR);
         filesystem::permissions(settings.LOCKDIR, filesystem::perms::all);
     }
+
+    // cleanup old files from the lock directory.
+    Protocol* proto = new Protocol();
+    proto->cleanup();
+    proto->close();
+    delete proto;
 }
 
 /*
@@ -101,8 +111,8 @@ extern "C" int flock(int fd, int operation) {
     // if this file is not already in our lock_map, create
     if (lock_map.count(fd) == 0) {
         // store information about this files. We also create the local lock file here
-        lock_map[fd] = shared_ptr<LockInfo>(new LockInfo(fd));
-        logger->debug("\n{}", lock_map[fd]->str());
+        lock_map[fd] = std::make_shared<LockInfo>(fd);
+        logger->debug(lock_map[fd]->str());
     }
 
     // perform the operation on the local file
@@ -181,8 +191,8 @@ extern "C" int fcntl(int fd, int operation, ...) {
             // if this file is not already in our lock_map, create
             if (lock_map.count(fd) == 0) {
                 // store information about this files. We also create the local lock file here
-                lock_map[fd] = shared_ptr<LockInfo>(new LockInfo(fd));
-                logger->debug("\n{}", lock_map[fd]->str());
+                lock_map[fd] = std::make_shared<LockInfo>(fd);
+                logger->debug(lock_map[fd]->str());
             }
 
             // perform the operation on the local file
@@ -204,10 +214,9 @@ extern "C" int fcntl(int fd, int operation, ...) {
  * replacement for the close function.
  */
 extern "C" int close(int fd) {
-    logger->debug("close({0})", fd);
-
     // close the file and free the lock information if this is a known locked file.
     if (lock_map.count(fd) > 0) {
+        logger->debug("close({0})", fd);
         logger->debug("    -> {} is known!", lock_map[fd]->orignal_path);
         logger->debug("    -> {} is also closed!", lock_map[fd]->local_path);
         lock_map[fd]->cleanup();
