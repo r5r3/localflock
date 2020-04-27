@@ -46,5 +46,6 @@ string LockInfo::str() {
 void LockInfo::cleanup() {
     if (this->local_fd > 0) {
         originalClose(this->local_fd);
+        this->local_fd = -1;
     }
 }

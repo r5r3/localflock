@@ -23,11 +23,29 @@ string get_path_for_fd(int fd) {
  */
 string get_local_lock_path(string &path) {
     string suffix;
-    suffix.assign(path, 1, string::npos);
-    for (int i=0; i < suffix.size(); i++) {
-        if (suffix[i] == '/') suffix[i] = '-';
+    // use human readable file names
+    if (settings.SHOW_NAMES) {
+        suffix.assign(path, 1, string::npos);
+        for (int i=0; i < suffix.size(); i++) {
+            if (suffix[i] == '/') suffix[i] = '-';
+        }
+    // calculate a hash for the file name
+    } else {
+        // length of the hash
+        unsigned int digest_len = gcry_md_get_algo_dlen(GCRY_MD_SHA1);
+        unsigned char* digest = (unsigned char *)malloc(digest_len * sizeof(unsigned char));
+        char* digest_encoded = (char *)malloc(digest_len*2+1 * sizeof(char));
+        gcry_md_hash_buffer(GCRY_MD_SHA1, digest, path.c_str(), path.size());
+
+        for (int i=0; i<digest_len; i++) {
+            sprintf(&digest_encoded[i * 2], "%02x", digest[i]);
+        }
+        digest_encoded[digest_len*2] = 0;
+        suffix = string(digest_encoded);
+        free(digest);
+        free(digest_encoded);
     }
-    string result = fmt::format("/var/lock/localflock/{}", suffix);
+    string result = fmt::format("{}/{}", settings.LOCKDIR, suffix);
     return result;
 }
 

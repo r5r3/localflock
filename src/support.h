@@ -6,6 +6,7 @@
 
 // standard functions
 #include <string>
+#include <cstdlib>
 #include <filesystem>
 using namespace std;
 
@@ -14,6 +15,10 @@ using namespace std;
 #include "spdlog/sinks/stdout_sinks.h"
 #include "spdlog/fmt/fmt.h"
 extern shared_ptr<spdlog::logger> logger;
+
+// calculation of hashes for filenames used to obscure filenames
+#include <gcrypt.h>
+extern gcry_md_hd_t hash_context;
 
 // Type definition for overwritten function
 #include <fcntl.h>
@@ -28,5 +33,16 @@ extern original_close_type originalClose;
 // own functions
 string get_path_for_fd(int fd);
 string get_local_lock_path(string &path);
+
+// struct for settings
+struct settings_t {
+    // the directory to be used for lock files. Default: /var/lock/localflock.
+    string LOCKDIR;
+    // whether or not to show debug messages on stderr. Default: false.
+    bool DEBUG;
+    // whether or not to obscure files names. Default: false.
+    bool SHOW_NAMES;
+};
+extern settings_t settings;
 
 #endif //LOCALFLOCK_SUPPORT_H

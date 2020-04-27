@@ -3,7 +3,7 @@
  *
  * Author: Robert Redl
  *
- * Build Dependencies on Ubuntu: libspdlog-dev
+ * Build Dependencies on Ubuntu: libspdlog-dev, libgcrypt20-dev
  */
 
 // We want to find the original implementation of a function, which is not our implementation.
@@ -26,20 +26,22 @@ original_flock_type originalFlock;
 original_fcntl_type originalFcntl;
 original_close_type originalClose;
 
-// a dictionary to keep track of locks
-map<int, shared_ptr<LockInfo>> lock_map;
+// a dictionary to keep track of locks and one for settings. The init priority makes sure that they are
+// initialized before calling the init method.
+map<int, shared_ptr<LockInfo>> lock_map __attribute__ ((init_priority (101)));;
+settings_t settings __attribute__ ((init_priority (101)));;
 
 /*
  * Cleanup function called when the program loading this library is closed. This is unfortunately not
  * always ensured.
  */
 void __attribute__ ((destructor)) cleanup() {
-    logger->info("cleanup");
-    logger->info("cleaning up {} locks...", lock_map.size());
+    logger->debug("cleanup");
+    logger->debug("cleaning up {} locks...", lock_map.size());
 
     // loop over all remaining locks and remove them
     for (const auto& one_lock: lock_map) {
-        logger->info("removing lock for fd={0}, path={1}", one_lock.first, one_lock.second->orignal_path);
+        logger->debug("removing lock for fd={0}, path={1}", one_lock.first, one_lock.second->orignal_path);
         one_lock.second->cleanup();
     }
 }
@@ -56,10 +58,37 @@ void __attribute__ ((constructor)) init() {
     // register a logger
     logger = spdlog::stderr_logger_st("localflock");
 
+    // read settings from environment variables
+    const char* value = getenv("LOCALFLOCK_DEBUG");
+    if (value == nullptr) {
+        settings.DEBUG = false;
+    } else {
+        settings.DEBUG = true;
+        logger->set_level(spdlog::level::debug);
+        logger->debug("LOCALFLOCK_DEBUG=TRUE");
+    }
+    value = getenv("LOCALFLOCK_LOCKDIR");
+    if (value == nullptr) {
+        settings.LOCKDIR = "/var/lock/localflock";
+    } else {
+        settings.LOCKDIR = string(value);
+    }
+    logger->debug("LOCALFLOCK_LOCKDIR={}", settings.LOCKDIR);
+    value = getenv("LOCALFLOCK_SHOW_NAMES");
+    if (value == nullptr) {
+        settings.SHOW_NAMES = false;
+        // init hashing library here
+        gcry_control(GCRYCTL_DISABLE_SECMEM, 0);
+        gcry_control(GCRYCTL_INITIALIZATION_FINISHED, 0);
+    } else {
+        settings.SHOW_NAMES = true;
+    }
+    logger->debug("LOCALFLOCK_SHOW_NAMES={}", settings.SHOW_NAMES);
+
     // create the local folder for locks.
-    if (!filesystem::is_directory("/var/lock/localflock")) {
-        filesystem::create_directory("/var/lock/localflock");
-        filesystem::permissions("/var/lock/localflock", filesystem::perms::all);
+    if (!filesystem::is_directory(settings.LOCKDIR)) {
+        filesystem::create_directory(settings.LOCKDIR);
+        filesystem::permissions(settings.LOCKDIR, filesystem::perms::all);
     }
 }
 
@@ -67,18 +96,17 @@ void __attribute__ ((constructor)) init() {
  * Replacement for the flock function.
  */
 extern "C" int flock(int fd, int operation) {
-    logger->info("flock({0}, {1})", fd, operation);
+    logger->debug("flock({0}, {1})", fd, operation);
 
     // if this file is not already in our lock_map, create
     if (lock_map.count(fd) == 0) {
         // store information about this files. We also create the local lock file here
         lock_map[fd] = shared_ptr<LockInfo>(new LockInfo(fd));
-        logger->info("number of locks: {}", lock_map.size());
-        logger->info("\n{}", lock_map[fd]->str());
+        logger->debug("\n{}", lock_map[fd]->str());
     }
 
     // perform the operation on the local file
-    logger->info("calling flock for {}", lock_map[fd]->local_fd);
+    logger->debug("    -> calling flock for local file {}", lock_map[fd]->local_path);
     return originalFlock(lock_map[fd]->local_fd, operation);
 }
 
@@ -88,7 +116,7 @@ extern "C" int flock(int fd, int operation) {
  * on the second argument whether to call the original fcntl on the original or the lock file.
  */
 extern "C" int fcntl(int fd, int operation, ...) {
-    logger->info("fcntl({0}, {1}, ...)", fd, operation);
+    logger->debug("fcntl({0}, {1}, ...)", fd, operation);
     // we have to deal with a variable list of arguments. The third argument is optional.
     // and can have different types.
     struct flock* arg_flock;
@@ -110,7 +138,7 @@ extern "C" int fcntl(int fd, int operation, ...) {
         case F_NOTIFY:
         case F_SETPIPE_SZ:
         case F_ADD_SEALS:
-            logger->info("    -> forwarding integer arg for original file");
+            logger->debug("    -> forwarding integer arg for original file");
             arg_int = va_arg(vl, int);
             result = originalFcntl(fd, operation, arg_int);
             break;
@@ -119,7 +147,7 @@ extern "C" int fcntl(int fd, int operation, ...) {
         case F_SET_RW_HINT:
         case F_GET_FILE_RW_HINT:
         case F_SET_FILE_RW_HINT:
-            logger->info("    -> forwarding uint64_t* arg for original file");
+            logger->debug("    -> forwarding uint64_t* arg for original file");
             arg_uint64_t = va_arg(vl, uint64_t*);
             result = originalFcntl(fd, operation, arg_uint64_t);
             break;
@@ -131,13 +159,13 @@ extern "C" int fcntl(int fd, int operation, ...) {
         case F_GETLEASE:
         case F_GETPIPE_SZ:
         case F_GET_SEALS:
-            logger->info("    -> forwarding no arg for original file");
+            logger->debug("    -> forwarding no arg for original file");
             result = originalFcntl(fd, operation);
             break;
         // cases with f_owner_ex
         case F_GETOWN_EX:
         case F_SETOWN_EX:
-            logger->info("    -> forwarding f_owner_ex* arg for original file");
+            logger->debug("    -> forwarding f_owner_ex* arg for original file");
             arg_f_owner_ex = va_arg(vl, f_owner_ex*);
             result = originalFcntl(fd, operation, arg_f_owner_ex);
             break;
@@ -154,12 +182,11 @@ extern "C" int fcntl(int fd, int operation, ...) {
             if (lock_map.count(fd) == 0) {
                 // store information about this files. We also create the local lock file here
                 lock_map[fd] = shared_ptr<LockInfo>(new LockInfo(fd));
-                logger->info("number of locks: {}", lock_map.size());
-                logger->info("\n{}", lock_map[fd]->str());
+                logger->debug("\n{}", lock_map[fd]->str());
             }
 
             // perform the operation on the local file
-            logger->info("    -> forwarding flock* arg for local file {}", lock_map[fd]->local_path);
+            logger->debug("    -> forwarding flock* arg for local file {}", lock_map[fd]->local_path);
             result = originalFcntl(lock_map[fd]->local_fd, operation, arg_flock);
             break;
         // for the default case, we assume no argument
@@ -169,7 +196,7 @@ extern "C" int fcntl(int fd, int operation, ...) {
             break;
     }
     va_end(vl);
-    logger->info("    -> result: {}", result);
+    logger->debug("    -> result: {}", result);
     return result;
 }
 
@@ -177,11 +204,12 @@ extern "C" int fcntl(int fd, int operation, ...) {
  * replacement for the close function.
  */
 extern "C" int close(int fd) {
-    logger->info("close({0})", fd);
+    logger->debug("close({0})", fd);
 
     // close the file and free the lock information if this is a known locked file.
     if (lock_map.count(fd) > 0) {
-        logger->info("    -> {} is locked!", lock_map[fd]->orignal_path);
+        logger->debug("    -> {} is known!", lock_map[fd]->orignal_path);
+        logger->debug("    -> {} is also closed!", lock_map[fd]->local_path);
         lock_map[fd]->cleanup();
         lock_map.erase(fd);
     }
