@@ -54,9 +54,49 @@ string get_local_lock_path(string &path) {
  */
 int open_and_set_perm(string &path) {
     int fd = open(path.c_str(), O_CREAT | O_RDWR);
-    filesystem::permissions(path, filesystem::perms::all
-                                    & ~filesystem::perms::owner_exec
-                                    & ~filesystem::perms::group_exec
-                                    & ~filesystem::perms::others_exec);
+
+    // the file may already have to correct permissions, but a different owner. In this case, don't try to update
+    // the permissions.
+    filesystem::perms required_perms = filesystem::perms::all
+                                       & ~filesystem::perms::owner_exec
+                                       & ~filesystem::perms::group_exec
+                                       & ~filesystem::perms::others_exec;
+    filesystem::perms actual_perms = filesystem::status(path).permissions();
+    if (actual_perms != required_perms) {
+        logger->debug("updating permissions of {} from {} to {}.", path, perms_to_str(actual_perms), perms_to_str(required_perms));
+        try {
+            filesystem::permissions(path, required_perms);
+        } catch (const std::exception& e) {
+            logger->warn("open_and_set_perm: error during permission update:");
+            logger->warn(e.what());
+        }
+    }
     return fd;
+}
+
+/**
+ * Create a string representation of the permission for usage in an error message
+ */
+string perms_to_str(filesystem::perms p)
+{
+    string result = "";
+    if ((p & filesystem::perms::owner_read) != filesystem::perms::none) result += "r";
+    else result += "-";
+    if ((p & filesystem::perms::owner_write) != filesystem::perms::none) result += "w";
+    else result += "-";
+    if ((p & filesystem::perms::owner_exec) != filesystem::perms::none) result += "x";
+    else result += "-";
+    if ((p & filesystem::perms::group_read) != filesystem::perms::none) result += "r";
+    else result += "-";
+    if ((p & filesystem::perms::group_write) != filesystem::perms::none) result += "w";
+    else result += "-";
+    if ((p & filesystem::perms::group_exec) != filesystem::perms::none) result += "x";
+    else result += "-";
+    if ((p & filesystem::perms::others_read) != filesystem::perms::none) result += "r";
+    else result += "-";
+    if ((p & filesystem::perms::others_write) != filesystem::perms::none) result += "w";
+    else result += "-";
+    if ((p & filesystem::perms::others_exec) != filesystem::perms::none) result += "x";
+    else result += "-";
+    return result;
 }

@@ -34,6 +34,7 @@ extern original_close_type originalClose;
 string get_path_for_fd(int fd);
 string get_local_lock_path(string &path);
 int open_and_set_perm(string &path);
+string perms_to_str(filesystem::perms p);
 
 // struct for settings
 struct settings_t {
