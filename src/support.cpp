@@ -24,7 +24,7 @@ string get_path_for_fd(int fd) {
 string get_local_lock_path(string &path) {
     string suffix;
     // use human readable file names
-    if (settings.SHOW_NAMES) {
+    if (settings->SHOW_NAMES) {
         suffix.assign(path, 1, string::npos);
         for (int i=0; i < suffix.size(); i++) {
             if (suffix[i] == '/') suffix[i] = '-';
@@ -45,7 +45,7 @@ string get_local_lock_path(string &path) {
         free(digest);
         free(digest_encoded);
     }
-    string result = fmt::format("{}/{}", settings.LOCKDIR, suffix);
+    string result = fmt::format("{}/{}", settings->LOCKDIR, suffix);
     return result;
 }
 

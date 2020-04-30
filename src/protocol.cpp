@@ -11,10 +11,10 @@
  * Open and if necessary create the protocol file. The file will be locked directly.
  */
 Protocol::Protocol() {
-    logger->debug("opening protocol file {}", settings.PROTOCOL_FILE);
-    this->fd = open_and_set_perm(settings.PROTOCOL_FILE);
+    logger->debug("opening protocol file {}", settings->PROTOCOL_FILE);
+    this->fd = open_and_set_perm(settings->PROTOCOL_FILE);
     int err = originalFlock(this->fd, LOCK_EX);
-    if (err != 0) logger->error("unable to lock protocol file {}", settings.PROTOCOL_FILE);
+    if (err != 0) logger->error("unable to lock protocol file {}", settings->PROTOCOL_FILE);
 }
 
 /*

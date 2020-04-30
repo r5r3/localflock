@@ -8,6 +8,8 @@
 #include <string>
 #include <cstdlib>
 #include <filesystem>
+#include <thread>
+#include <chrono>
 using namespace std;
 
 // SPDlog Header-Only Logger
@@ -29,6 +31,8 @@ typedef int (*original_close_type)(int);
 extern original_flock_type originalFlock;
 extern original_fcntl_type originalFcntl;
 extern original_close_type originalClose;
+extern bool init_called;
+extern mutex mtx;
 
 // own functions
 string get_path_for_fd(int fd);
@@ -47,6 +51,6 @@ struct settings_t {
     // name for the protocol file. Default: $LOCKDIR/protocl, not changeable
     string PROTOCOL_FILE;
 };
-extern settings_t settings;
+extern shared_ptr<settings_t> settings;
 
 #endif //LOCALFLOCK_SUPPORT_H

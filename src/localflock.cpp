@@ -28,17 +28,19 @@ shared_ptr<spdlog::logger> logger;
 original_flock_type originalFlock;
 original_fcntl_type originalFcntl;
 original_close_type originalClose;
+bool init_called = false;
+mutex mtx;
 
 // a dictionary to keep track of locks and one for settings. The init priority makes sure that they are
 // initialized before calling the init method.
-map<int, shared_ptr<LockInfo>> lock_map __attribute__ ((init_priority (101)));;
-settings_t settings __attribute__ ((init_priority (101)));;
+map<int, shared_ptr<LockInfo>> lock_map __attribute__ ((init_priority (101)));
+shared_ptr<settings_t> settings __attribute__ ((init_priority (101)));
 
 /*
  * Cleanup function called when the program loading this library is closed. This is unfortunately not
  * always ensured.
  */
-void __attribute__ ((destructor)) cleanup() {
+void __attribute__ ((destructor)) localflock_cleanup() {
     logger->debug("cleanup");
 
     // loop over all remaining locks and remove them
@@ -52,7 +54,10 @@ void __attribute__ ((destructor)) cleanup() {
 /*
  * initialize internal structures and pointers to original functions
  */
-void __attribute__ ((constructor)) init() {
+void __attribute__ ((constructor (102))) localflock_init() {
+    if (init_called) return;
+    mtx.lock();
+
     // get pointers to the original system functions.
     originalFlock = (original_flock_type)dlsym(RTLD_NEXT, "flock");
     originalFcntl = (original_fcntl_type)dlsym(RTLD_NEXT, "fcntl");
@@ -62,37 +67,38 @@ void __attribute__ ((constructor)) init() {
     logger = spdlog::stderr_logger_st("localflock");
 
     // read settings from environment variables
+    settings = make_shared<settings_t>();
     const char* value = getenv("LOCALFLOCK_DEBUG");
     if (value == nullptr) {
-        settings.DEBUG = false;
+        settings->DEBUG = false;
     } else {
-        settings.DEBUG = true;
+        settings->DEBUG = true;
         logger->set_level(spdlog::level::debug);
     }
-    logger->debug("LOCALFLOCK_DEBUG={}", settings.DEBUG);
+    logger->debug("LOCALFLOCK_DEBUG={}", settings->DEBUG);
     value = getenv("LOCALFLOCK_LOCKDIR");
     if (value == nullptr) {
-        settings.LOCKDIR = "/var/lock/localflock";
+        settings->LOCKDIR = "/var/lock/localflock";
     } else {
-        settings.LOCKDIR = string(value);
+        settings->LOCKDIR = string(value);
     }
-    settings.PROTOCOL_FILE = fmt::format("{}/protocol", settings.LOCKDIR);
-    logger->debug("LOCALFLOCK_LOCKDIR={}", settings.LOCKDIR);
+    settings->PROTOCOL_FILE = fmt::format("{}/protocol", settings->LOCKDIR);
+    logger->debug("LOCALFLOCK_LOCKDIR={}", settings->LOCKDIR);
     value = getenv("LOCALFLOCK_SHOW_NAMES");
     if (value == nullptr) {
-        settings.SHOW_NAMES = false;
+        settings->SHOW_NAMES = false;
         // init hashing library here
         gcry_control(GCRYCTL_DISABLE_SECMEM, 0);
         gcry_control(GCRYCTL_INITIALIZATION_FINISHED, 0);
     } else {
-        settings.SHOW_NAMES = true;
+        settings->SHOW_NAMES = true;
     }
-    logger->debug("LOCALFLOCK_SHOW_NAMES={}", settings.SHOW_NAMES);
+    logger->debug("LOCALFLOCK_SHOW_NAMES={}", settings->SHOW_NAMES);
 
     // create the local folder for locks.
-    if (!filesystem::is_directory(settings.LOCKDIR)) {
-        filesystem::create_directory(settings.LOCKDIR);
-        filesystem::permissions(settings.LOCKDIR, filesystem::perms::all);
+    if (!filesystem::is_directory(settings->LOCKDIR)) {
+        filesystem::create_directory(settings->LOCKDIR);
+        filesystem::permissions(settings->LOCKDIR, filesystem::perms::all);
     }
 
     // cleanup old files from the lock directory.
@@ -100,12 +106,29 @@ void __attribute__ ((constructor)) init() {
     proto->cleanup();
     proto->close();
     delete proto;
+
+    // now we are done with initialisation
+    init_called = true;
+    mtx.unlock();
+}
+
+/*
+ * make sure that the init function has already been called.
+ */
+void wait_for_init() {
+    int waited = 0;
+    while (!init_called && waited < 1000) {
+        this_thread::sleep_for(chrono::milliseconds(1));
+        waited++;
+    }
+    if (!init_called) localflock_init();
 }
 
 /*
  * Replacement for the flock function.
  */
 extern "C" int flock(int fd, int operation) {
+    wait_for_init();
     logger->debug("flock({0}, {1})", fd, operation);
 
     // if this file is not already in our lock_map, create
@@ -126,6 +149,7 @@ extern "C" int flock(int fd, int operation) {
  * on the second argument whether to call the original fcntl on the original or the lock file.
  */
 extern "C" int fcntl(int fd, int operation, ...) {
+    wait_for_init();
     logger->debug("fcntl({0}, {1}, ...)", fd, operation);
     // we have to deal with a variable list of arguments. The third argument is optional.
     // and can have different types.
@@ -170,7 +194,7 @@ extern "C" int fcntl(int fd, int operation, ...) {
         case F_GETPIPE_SZ:
         case F_GET_SEALS:
             logger->debug("    -> forwarding no arg for original file");
-            result = originalFcntl(fd, operation);
+            result = originalFcntl(fd, operation, NULL);
             break;
         // cases with f_owner_ex
         case F_GETOWN_EX:
@@ -214,6 +238,7 @@ extern "C" int fcntl(int fd, int operation, ...) {
  * replacement for the close function.
  */
 extern "C" int close(int fd) {
+    wait_for_init();
     // close the file and free the lock information if this is a known locked file.
     if (lock_map.count(fd) > 0) {
         logger->debug("close({0})", fd);
