@@ -17,8 +17,10 @@ using namespace std;
 
 // this includes the dlsym to load the original function
 #include <dlfcn.h>
-
 #include <memory>
+
+// some functionality of fnctl depends on the linux kernel version
+#include <linux/version.h>
 
 // class for lock information and other support functions
 #include "lock_info.h"
@@ -171,12 +173,15 @@ extern "C" int fcntl(int fd, int operation, ...) {
         case F_SETLEASE:
         case F_NOTIFY:
         case F_SETPIPE_SZ:
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,17,0)
         case F_ADD_SEALS:
+#endif
             logger->debug("    -> forwarding integer arg for original file");
             arg_int = va_arg(vl, int);
             result = originalFcntl(fd, operation, arg_int);
             break;
         // cases with uint64_t pointer
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,13,0)
         case F_GET_RW_HINT:
         case F_SET_RW_HINT:
         case F_GET_FILE_RW_HINT:
@@ -185,6 +190,7 @@ extern "C" int fcntl(int fd, int operation, ...) {
             arg_uint64_t = va_arg(vl, uint64_t*);
             result = originalFcntl(fd, operation, arg_uint64_t);
             break;
+#endif
         // cases with void argument
         case F_GETFD:
         case F_GETFL:
@@ -192,7 +198,9 @@ extern "C" int fcntl(int fd, int operation, ...) {
         case F_GETSIG:
         case F_GETLEASE:
         case F_GETPIPE_SZ:
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,17,0)
         case F_GET_SEALS:
+#endif
             logger->debug("    -> forwarding no arg for original file");
             result = originalFcntl(fd, operation, NULL);
             break;
@@ -207,9 +215,11 @@ extern "C" int fcntl(int fd, int operation, ...) {
         case F_SETLK:
         case F_SETLKW:
         case F_GETLK:
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,17,0)
         case F_OFD_SETLK:
         case F_OFD_SETLKW:
         case F_OFD_GETLK:
+#endif
             arg_flock = va_arg(vl, struct flock*);
 
             // if this file is not already in our lock_map, create
